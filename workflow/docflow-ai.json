@@ -1,0 +1,595 @@
+{
+  "name": "DocFlow AI — Confidence-Aware Document Intelligence",
+  "nodes": [
+    {
+      "id": "6fc22a42",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "92c24266",
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "id": "fc3b4e39",
+      "name": "Check Photo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message;\nconst chatId = msg?.chat?.id;\nconst messageId = msg?.message_id;\n\nif (!msg?.photo || msg.photo.length === 0) {\n  return [{\n    json: {\n      hasPhoto: false,\n      chat_id: chatId,\n      message_id: messageId,\n      error: 'no_photo'\n    }\n  }];\n}\n\nconst photo = msg.photo[msg.photo.length - 1];\nreturn [{\n  json: {\n    hasPhoto: true,\n    file_id: photo.file_id,\n    chat_id: chatId,\n    message_id: messageId,\n    file_size: photo.file_size || 0\n  }\n}];"
+      }
+    },
+    {
+      "id": "1a98f7bf",
+      "name": "Reply No Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{$json.chat_id}}"
+            },
+            {
+              "name": "text",
+              "value": "📎 กรุณาส่งรูปภาพเอกสาร (สลิป / ใบแจ้งหนี้ / ใบเสร็จ / ใบสั่งซื้อ)"
+            },
+            {
+              "name": "reply_to_message_id",
+              "value": "={{$json.message_id}}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fce1d554",
+      "name": "Get File Path",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        380
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_TOKEN}}/getFile?file_id={{$json.file_id}}",
+        "options": {}
+      }
+    },
+    {
+      "id": "41e4a656",
+      "name": "Download File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        380
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.telegram.org/file/bot{{$env.TELEGRAM_TOKEN}}/{{$json.result.file_path}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "8d08008f",
+      "name": "To Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        380
+      ],
+      "parameters": {
+        "jsCode": "const binaryKey = Object.keys($input.first().binary || {})[0];\nif (!binaryKey) {\n  throw new Error('No binary data found — download failed');\n}\n\nconst binary = $input.first().binary[binaryKey];\nconst base64 = binary.data;\nconst prevJson = $('Check Photo').first().json;\n\nreturn [{\n  json: {\n    imageBase64: base64,\n    mimeType: binary.mimeType || 'image/jpeg',\n    chat_id: prevJson.chat_id,\n    message_id: prevJson.message_id,\n    file_size: prevJson.file_size\n  }\n}];"
+      }
+    },
+    {
+      "id": "f6b1574b",
+      "name": "Gemini Flash — Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        380
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{$env.GEMINI_API_KEY}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"system_instruction\": {\n    \"parts\": [{\n      \"text\": \"You are a Thai business document parser. Return ONLY valid JSON — no markdown, no explanation. Be conservative with confidence. Amounts numeric only. Dates ISO 8601.\"\n    }]\n  },\n  \"contents\": [{\n    \"parts\": [\n      {\n        \"inline_data\": {\n          \"mime_type\": \"image/jpeg\",\n          \"data\": \"{{ $json.imageBase64 }}\"\n        }\n      },\n      {\n        \"text\": \"Classify and extract data from this document. Types: slip (สลิปโอนเงิน), invoice (ใบแจ้งหนี้), receipt (ใบเสร็จ), purchase_order (ใบสั่งซื้อ), unknown.\\n\\nReturn ONLY this JSON:\\n{\\\"type\\\":\\\"...\\\",\\\"confidence\\\":0.0,\\\"data\\\":{\\\"amount\\\":0,\\\"currency\\\":\\\"THB\\\",\\\"sender_name\\\":null,\\\"receiver_name\\\":null,\\\"bank\\\":null,\\\"datetime\\\":null,\\\"ref_number\\\":null,\\\"description\\\":null},\\\"extraction_notes\\\":\\\"...\\\"}\\n\\nIf unreadable: type=unknown, confidence=0.0, all data fields=null.\"\n      }\n    ]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 512,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ef36be22",
+      "name": "Parse & Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        380
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst prev = $('To Base64').first().json;\n\nlet parsed;\ntry {\n  const text = raw?.candidates?.[0]?.content?.parts?.[0]?.text;\n  parsed = typeof text === 'string' ? JSON.parse(text) : text;\n} catch(e) {\n  parsed = { type: 'unknown', confidence: 0.0, data: {}, extraction_notes: 'parse_error: ' + e.message };\n}\n\nconst confidence = parsed?.confidence ?? 0.0;\nconst LOW = parseFloat($env.LOW_THRESHOLD || '0.60');\nconst HIGH = parseFloat($env.HIGH_THRESHOLD || '0.85');\n\nlet route, status;\nif (confidence < LOW) {\n  route = 'low';\n  status = 'needs_review';\n} else if (confidence < HIGH) {\n  route = 'medium';\n  status = 'flagged';\n} else {\n  route = 'high';\n  status = 'auto';\n}\n\nconst now = new Date().toISOString();\nconst data = parsed?.data || {};\n\nreturn [{\n  json: {\n    route,\n    status,\n    confidence,\n    doc_type: parsed?.type || 'unknown',\n    timestamp: now,\n    amount: data.amount ?? null,\n    currency: data.currency ?? 'THB',\n    sender_name: data.sender_name ?? null,\n    receiver_name: data.receiver_name ?? null,\n    bank: data.bank ?? null,\n    doc_datetime: data.datetime ?? null,\n    ref_number: data.ref_number ?? null,\n    description: data.description ?? null,\n    extraction_notes: parsed?.extraction_notes ?? '',\n    raw_json: JSON.stringify(parsed),\n    chat_id: prev.chat_id,\n    message_id: prev.message_id\n  }\n}];"
+      }
+    },
+    {
+      "id": "0025939a",
+      "name": "Confidence Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1780,
+        380
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.route}}",
+                    "rightValue": "low",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "low"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.route}}",
+                    "rightValue": "medium",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "medium"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.route}}",
+                    "rightValue": "high",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "high"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "94c8e52f",
+      "name": "Reply — Low Confidence",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{$json.chat_id}}"
+            },
+            {
+              "name": "text",
+              "value": "=⚠️ AI ไม่แน่ใจ (confidence: {{Math.round($json.confidence * 100)}}%)\n\nกรุณาส่งรูปที่:\n• ชัดเจน ไม่เบลอ\n• มีแสงสว่างเพียงพอ\n• ถ่ายตรงๆ ไม่เอียง"
+            },
+            {
+              "name": "reply_to_message_id",
+              "value": "={{$json.message_id}}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b323285f",
+      "name": "Sheets — Flagged",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        2000,
+        380
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{$env.SHEET_ID}}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All Documents",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{$json.timestamp}}",
+            "Type": "={{$json.doc_type}}",
+            "Status": "={{$json.status}}",
+            "Confidence": "={{$json.confidence}}",
+            "Amount": "={{$json.amount}}",
+            "Currency": "={{$json.currency}}",
+            "Sender": "={{$json.sender_name}}",
+            "Receiver": "={{$json.receiver_name}}",
+            "Bank": "={{$json.bank}}",
+            "DateTime": "={{$json.doc_datetime}}",
+            "RefNumber": "={{$json.ref_number}}",
+            "Description": "={{$json.description}}",
+            "ChatID": "={{$json.chat_id}}",
+            "ExtractionNotes": "={{$json.extraction_notes}}",
+            "RawJSON": "={{$json.raw_json}}"
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "9dc71d7b",
+      "name": "Reply — Medium",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2220,
+        380
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{$json.chat_id}}"
+            },
+            {
+              "name": "text",
+              "value": "=🟡 บันทึกแล้ว (ตรวจสอบอีกครั้ง)\n\n📄 ประเภท: {{$json.doc_type}}\n💰 ยอด: {{$json.amount ? $json.amount.toLocaleString() + ' ' + $json.currency : 'ไม่พบ'}}\n👤 จาก: {{$json.sender_name || 'ไม่พบ'}}\n🏦 ธนาคาร: {{$json.bank || 'ไม่พบ'}}\n🔢 เลขอ้างอิง: {{$json.ref_number || 'ไม่พบ'}}\n\n⚠️ confidence {{Math.round($json.confidence * 100)}}% — ทีมงานจะตรวจสอบอีกครั้ง"
+            },
+            {
+              "name": "reply_to_message_id",
+              "value": "={{$json.message_id}}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "04321a78",
+      "name": "Sheets — Auto",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        2000,
+        600
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{$env.SHEET_ID}}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All Documents",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{$json.timestamp}}",
+            "Type": "={{$json.doc_type}}",
+            "Status": "={{$json.status}}",
+            "Confidence": "={{$json.confidence}}",
+            "Amount": "={{$json.amount}}",
+            "Currency": "={{$json.currency}}",
+            "Sender": "={{$json.sender_name}}",
+            "Receiver": "={{$json.receiver_name}}",
+            "Bank": "={{$json.bank}}",
+            "DateTime": "={{$json.doc_datetime}}",
+            "RefNumber": "={{$json.ref_number}}",
+            "Description": "={{$json.description}}",
+            "ChatID": "={{$json.chat_id}}",
+            "ExtractionNotes": "={{$json.extraction_notes}}",
+            "RawJSON": "={{$json.raw_json}}"
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "8d0554a6",
+      "name": "Reply — High",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2220,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_TOKEN}}/sendMessage",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{$json.chat_id}}"
+            },
+            {
+              "name": "text",
+              "value": "=✅ บันทึกแล้วอัตโนมัติ\n\n📄 ประเภท: {{$json.doc_type}}\n💰 ยอด: {{$json.amount ? $json.amount.toLocaleString() + ' ' + $json.currency : 'ไม่พบ'}}\n👤 จาก: {{$json.sender_name || 'ไม่พบ'}}\n🏦 ธนาคาร: {{$json.bank || 'ไม่พบ'}}\n🔢 เลขอ้างอิง: {{$json.ref_number || 'ไม่พบ'}}\n🕐 เวลาเอกสาร: {{$json.doc_datetime || 'ไม่พบ'}}\n\n🎯 confidence: {{Math.round($json.confidence * 100)}}%"
+            },
+            {
+              "name": "reply_to_message_id",
+              "value": "={{$json.message_id}}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Photo": {
+      "main": [
+        [
+          {
+            "node": "Reply No Photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get File Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get File Path": {
+      "main": [
+        [
+          {
+            "node": "Download File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File": {
+      "main": [
+        [
+          {
+            "node": "To Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To Base64": {
+      "main": [
+        [
+          {
+            "node": "Gemini Flash — Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash — Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse & Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Route": {
+      "main": [
+        [
+          {
+            "node": "Confidence Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence Router": {
+      "main": [
+        [
+          {
+            "node": "Reply — Low Confidence",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sheets — Flagged",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sheets — Auto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets — Flagged": {
+      "main": [
+        [
+          {
+            "node": "Reply — Medium",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets — Auto": {
+      "main": [
+        [
+          {
+            "node": "Reply — High",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "826bd71f-5057-44fa-a6fd-660b3fb8cfaf",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "docflow-ai-v1"
+  },
+  "id": "9f00e80b-cbc7-4639-bb99-b132bb90f480",
+  "tags": [
+    {
+      "name": "docflow-ai",
+      "id": "b9afab73"
+    }
+  ]
+}
